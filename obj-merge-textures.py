@@ -149,7 +149,10 @@ def main(argv):
         input_dirname = os.path.dirname(options.input)
     if options.output is None or options.output == '-':
         output_dirname = '.'
-        basename = obj
+        if options.input is None or options.input == '-':
+            basename = 'obj'
+        else:
+            basename = os.path.basename(os.path.split(options.input)[0])
     else:
         output_dirname = os.path.dirname(options.output) or '.'
         basename = os.path.splitext(os.path.basename(options.output))[0]
