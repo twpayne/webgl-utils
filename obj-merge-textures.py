@@ -139,6 +139,8 @@ def main(argv):
     parser.add_option('-o', '--output', metavar='FILENAME', help='object filename')
     parser.add_option('-m', '--margin', default=2, metavar='PIXELS', type=int)
     parser.add_option('-a', '--alignment', default=1, metavar='N', type=int)
+    parser.add_option('--untextured-faces', choices=('discard', 'keep'), default='discard')
+    parser.add_option('--invalid-faces', choices=('discard', 'keep'), default='discard')
     parser.add_option('-d', '--debug', action='store_true')
     options, args = parser.parse_args(argv[1:])
     if options.input is None or options.input == '-':
@@ -186,15 +188,16 @@ def main(argv):
                     material.image.filename = filename
                     continue
             continue
-    # Assert that all texture vertices are valid
-    assert all(0.0 <= vt.x <= 1.0 and 0.0 <= vt.y <= 1 for vt in vts[1:])
     materials = materials_by_name.values()
-    logger.info('found %d materials and %d texture vertices' % (len(materials), len(vts) - 1))
+    logger.info('found %d materials' % len(materials))
     if options.debug:
         # Create ImageDraw objects for each material
         for material in materials:
             if material.image:
                 material.image.draw = ImageDraw.Draw(material.image)
+    # Blacklist invalid texture vertices
+    blacklisted_vtis = set(vti for vti in xrange(1, len(vts)) if vts[vti].x < 0.0 or 1.0 < vts[vti].x or vts[vti].y < 0.0 or 1.0 < vts[vti].y)
+    logger.info('found %d texture vertices (%d out of range)' % (len(vts) - 1, len(blacklisted_vtis)))
     # Determine the material used for each texture vertex and build the list of connected texture vertices
     material = None
     materials_by_vti = defaultdict(set)
@@ -208,7 +211,9 @@ def main(argv):
             continue
         if fields[0] == 'f':
             assert material is not None
-            vtis = list(int(vti) for vti in (field.split('/')[1] for field in fields[1:]) if vti)
+            if material.image is None:
+                continue
+            vtis = set(int(vti) for vti in (field.split('/')[1] for field in fields[1:]) if vti) - blacklisted_vtis
             if not vtis:
                 continue
             for vti in vtis:
@@ -320,11 +325,27 @@ def main(argv):
     # Write the Wavefront OBJ file
     obj_filename = os.path.join(output_dirname, '%s.obj' % basename)
     logger.info('creating %s' % obj_filename)
+    fi, untextured_faces, invalid_faces, discarded_faces = 0, set(), set(), set()
     with open(obj_filename, 'w') as obj:
         vti = 0
         for line, fields in izip(lines, fieldss):
             if not fields:
                 obj.write(line)
+                continue
+            if fields[0] == 'f':
+                fi += 1
+                vtis = set(int(vti) if vti else None for vti in (field.split('/')[1] for field in fields[1:]))
+                discard = False
+                if vtis & blacklisted_vtis:
+                    invalid_faces.add(fi)
+                    discard = discard or options.invalid_faces == 'discard'
+                if None in vtis:
+                    untextured_faces.add(fi)
+                    discard = discard or options.untextured_faces == 'discard'
+                if discard:
+                    discarded_faces.add(fi)
+                else:
+                    obj.write(line)
                 continue
             if fields[0] == 'mtllib':
                 obj.write('mtllib %s.mtl\r\n' % basename)
@@ -332,19 +353,25 @@ def main(argv):
             if fields[0] == 'vt':
                 assert len(fields) == 3
                 vti += 1
-                vt = numpy.array([float(fields[1]), float(fields[2]), 1])
-                vt = numpy.dot(sub_image2_by_vti[vti].transform, vt)
-                obj.write('vt %f %f\r\n' % (vt[0], vt[1]))
-                if options.debug:
-                    # Mark up the image with a magenta rectangle at each new texture vertex
-                    i, j = vt[0] * image.size[0], vt[1] * image.size[1]
-                    r = 5
-                    image.draw.rectangle(((i - r, j - r), (i + r, j + r)), outline='#f0f', fill='#fff')
+                if vti in blacklisted_vtis:
+                    obj.write(line)
+                else:
+                    vt = numpy.array([float(fields[1]), float(fields[2]), 1])
+                    vt = numpy.dot(sub_image2_by_vti[vti].transform, vt)
+                    obj.write('vt %f %f\r\n' % (vt[0], vt[1]))
+                    if options.debug:
+                        # Mark up the image with a magenta rectangle at each new texture vertex
+                        i, j = vt[0] * image.size[0], vt[1] * image.size[1]
+                        r = 5
+                        image.draw.rectangle(((i - r, j - r), (i + r, j + r)), outline='#f0f', fill='#fff')
                 continue
             if fields[0] == 'usemtl':
                 obj.write('usemtl mtl\r\n')
                 continue
             obj.write(line)
+    logger.info('found %d untextured faces' % len(untextured_faces))
+    logger.info('found %d invalid faces' % len(invalid_faces))
+    logger.info('discarded %d faces' % len(discarded_faces))
     # Write the material library
     mtllib_filename = os.path.join(output_dirname, '%s.mtl' % basename)
     logger.info('creating %s' % mtllib_filename)
